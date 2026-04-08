@@ -76,26 +76,37 @@ def _solve_inner():
     
     z = {0.90:1.282, 0.95:1.645, 0.99:2.326}.get(sl, 1.645)
     wd = [22,20,23,21,22,21,23,22,20,23,21,20]
-    
+    sm_offset = params.get('start_month', 0)  # planning horizon start month (0=Jan)
+
     demand = {}; all_parts = []
     for k, prod in enumerate(products):
         dd = []
         monthly = prod.get('demand_monthly', prod.get('demand', []))
         for m in range(min(12, len(monthly))):
-            per = monthly[m] // wd[m]; rem = monthly[m] - per * wd[m]
-            dd += [per + (1 if i < rem else 0) for i in range(wd[m])]
+            wday = wd[(sm_offset + m) % 12]  # correct working-days for actual calendar month
+            per = monthly[m] // wday; rem = monthly[m] - per * wday
+            dd += [per + (1 if i < rem else 0) for i in range(wday)]
         dd = dd[:T_orig]
         while len(dd) < T_orig: dd.append(dd[-1] if dd else 8)
-        
+
         if bk > 1:
             bucketed = [sum(dd[w*bk:min((w+1)*bk, T_orig)]) for w in range(T)]
             demand[k] = bucketed
         else:
             demand[k] = dd
-        
+
         fy = prod.get('yield_pct', 0.95)
         parts = prod.get('parts', [])
-        rm = sum(p['qty'] / p.get('partYield', 0.97) / fy * (p['cost'] + p.get('trans', 0.5)) for p in parts)
+        # Split transport into variable (perUnit/ltl/contract) vs fixed-per-order (perShip/ftl)
+        for p in parts:
+            mode = p.get('trans_mode', 'perUnit')
+            if mode in ('perShip', 'ftl'):
+                p['uc_trans'] = 0.0
+                p['ord_trans'] = p.get('trans', 0.5)
+            else:  # perUnit, ltl, contract → variable landed cost
+                p['uc_trans'] = p.get('trans', 0.5)
+                p['ord_trans'] = 0.0
+        rm = sum(p['qty'] / p.get('partYield', 0.97) / fy * (p['cost'] + p['uc_trans']) for p in parts)
         prod['uc'] = rm
         prod['fh'] = rm * carry / 365 * bk
         prod['wc'] = rm * (1 - salv)
@@ -151,7 +162,7 @@ def _solve_inner():
     for i in range(np2):
         pt = all_parts[i]; rh = pt['cost'] * pt.get('hold_pct',24)/100/365*bk
         obj += [pulp.lpSum(rh*RI[i,t+1] for t in days),
-                pulp.lpSum(pt['cost']*r_v[i,t]+pt.get('ord_cost',50)*zo[i,t] for t in rng)]
+                pulp.lpSum(pt['cost']*r_v[i,t]+(pt.get('ord_cost',50)+pt.get('ord_trans',0))*zo[i,t] for t in rng)]
     m += pulp.lpSum(obj)
     
     for t in days:
