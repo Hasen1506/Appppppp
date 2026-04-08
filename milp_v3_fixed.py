@@ -241,7 +241,9 @@ products = [
                 'name': 'Cream Bun',
                 'qty': 1,               # Units of this RM per FG unit
                 'cost': 5.0,            # RM unit cost $/unit
-                'trans': 0.50,          # LTL transport $/unit (adds to landed cost → H)
+                'trans': 0.50,          # Transport cost ($/unit if LTL; $/shipment if FTL)
+                'trans_mode': 'perUnit',# 'perUnit'/'ltl'/'contract' → adds to landed cost (variable)
+                                        # 'perShip'/'ftl'           → adds to ordering cost (fixed/PO)
                 'lt': 3,                # Lead time days
                 'ltcv': 0.10,           # Lead time coefficient of variation (10% variability)
                 'hold_pct': 24,         # Annual carry rate % (capital + warehouse + insurance)
@@ -259,6 +261,7 @@ products = [
                 'qty': 2,
                 'cost': 10.0,
                 'trans': 1.20,
+                'trans_mode': 'perUnit',# Change to 'ftl' if this part ships full truckload
                 'lt': 5,
                 'ltcv': 0.10,
                 'hold_pct': 24,
@@ -293,6 +296,8 @@ products = [
                 'qty': 1.5,             # 1.5 kg flour per cookie batch unit
                 'cost': 2.0,
                 'trans': 0.30,
+                'trans_mode': 'perUnit',# 'perUnit'/'ltl'/'contract' → variable landed cost
+                                        # 'perShip'/'ftl'           → fixed per PO
                 'lt': 2,
                 'ltcv': 0.08,
                 'hold_pct': 20,
@@ -311,6 +316,7 @@ products = [
                 'qty': 0.5,
                 'cost': 1.5,
                 'trans': 0.20,
+                'trans_mode': 'perUnit',
                 'lt': 2,
                 'ltcv': 0.08,
                 'hold_pct': 20,
@@ -380,7 +386,7 @@ def compute_fg_hold(prod_idx):
     fg_yield = prod['yield_pct']
     # Sum landed raw material cost per FG unit (adjusted for part yield losses)
     rm_landed_per_fg = sum(
-        (p['qty'] * (p['cost'] + p['trans'])) / p['partYield']
+        (p['qty'] * (p['cost'] + (p['trans'] if p.get('trans_mode', 'perUnit') not in ('perShip', 'ftl') else 0.0))) / p['partYield']
         for p in prod['parts']
     ) / fg_yield
     # Add per-unit labor (variable portion — see labor section)
@@ -675,7 +681,8 @@ for k, prod in enumerate(products):
     for part in prod['parts']:
         # Effective RM per saleable FG unit = qty / partYield / fg_yield
         eff_qty       = part['qty'] / part['partYield'] / fg_yield
-        part_cost_val = eff_qty * (part['cost'] + part['trans'])
+        uc_trans      = part['trans'] if part.get('trans_mode', 'perUnit') not in ('perShip', 'ftl') else 0.0
+        part_cost_val = eff_qty * (part['cost'] + uc_trans)
         rm_cost      += part_cost_val
         print(f"    {prod['name']} ← {part['name']}: "
               f"{part['qty']} ÷ {part['partYield']} ÷ {fg_yield} = {eff_qty:.4f} effective units "
@@ -700,8 +707,10 @@ for k, prod in enumerate(products):
 # It is NOT the material cost — that is separate.
 # Total ordering cost for a PO = ord_cost (fixed) + material × qty (variable)
 # The MILP has: zo[i,t] (binary = PO placed) and r[i,t] (qty ordered)
-# Cost = ord_cost × zo[i,t] + material_cost × r[i,t]
-# (Transport $/unit is embedded in the landing cost → holding cost)
+# Cost = (ord_cost + ord_trans) × zo[i,t] + material_cost × r[i,t]
+# Transport routing (controlled by trans_mode per part):
+#   perUnit / ltl / contract → trans added to landed cost per unit → flows into holding cost
+#   perShip / ftl            → trans added to ord_trans (fixed per order, charged via zo[i,t])
 
 # Parts are per-product in this version (no shared parts assumption)
 # For shared capacity with shared parts, list them once with combined qty.
@@ -712,6 +721,13 @@ for k, prod in enumerate(products):
     for pi, part in enumerate(prod['parts']):
         part['prod_idx'] = k
         part['part_local_idx'] = pi
+        # Split transport into variable (per-unit) vs fixed (per-order)
+        if part.get('trans_mode', 'perUnit') in ('perShip', 'ftl'):
+            part['uc_trans']  = 0.0
+            part['ord_trans'] = part.get('trans', 0.0)  # goes into ordering cost
+        else:  # perUnit, ltl, contract
+            part['uc_trans']  = part.get('trans', 0.0)  # goes into landed cost
+            part['ord_trans'] = 0.0
         all_parts.append(part)
 
 # ─── REWORK & CAPACITY EXPANSION (disabled by default) ───────────────────────
@@ -996,8 +1012,8 @@ for i in range(n_parts):
     )
     obj_terms.append(
         pulp.lpSum(
-            part['cost'] * r[i, t]                    # RM purchase cost
-            + part['ord_cost'] * zo[i, t]             # PO admin cost (fixed per order)
+            part['cost'] * r[i, t]                                         # RM purchase cost
+            + (part['ord_cost'] + part['ord_trans']) * zo[i, t]           # PO admin + FTL transport (fixed per order)
             for t in rng_ext
         )
     )
