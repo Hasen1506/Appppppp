@@ -41,6 +41,13 @@ def health():
 
 @app.route('/solve', methods=['POST'])
 def solve():
+    try:
+        return _solve_inner()
+    except Exception as exc:
+        import traceback
+        return jsonify({"error": str(exc), "trace": traceback.format_exc()}), 500
+
+def _solve_inner():
     t0 = time.time()
     data = request.json
     products = data.get('products', [])
@@ -174,7 +181,7 @@ def solve():
             m+=r_v[i,t]>=pt.get('moq',20)*zo[i,t]
             m+=r_v[i,t]<=pt.get('max_order',200)*zo[i,t]
     
-    m.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=120, gapRel=0.05))
+    m.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=240, gapRel=0.05))
     
     status = pulp.LpStatus[m.status]
     cost = round(pulp.value(m.objective), 2) if m.status == 1 else None

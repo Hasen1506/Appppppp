@@ -3,7 +3,4 @@ services:
     name: enterprise-inventory-simulator
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
-    envVars:
-      - key: PORT
-        generateValue: true
+    startCommand: gunicorn app:app --workers 1 --timeout 300 --bind 0.0.0.0:$PORT
