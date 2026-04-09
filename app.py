@@ -107,9 +107,9 @@ def _solve_inner():
                 p['uc_trans'] = p.get('trans', 0.5)
                 p['ord_trans'] = 0.0
         rm = sum(p['qty'] / p.get('partYield', 0.97) / fy * (p['cost'] + p['uc_trans']) for p in parts)
-        prod['uc'] = rm
-        prod['fh'] = rm * carry / 365 * bk
-        prod['wc'] = rm * (1 - salv)
+        prod['uc'] = 0          # material already charged at ordering (pt['cost']*r_v[i,t]); zero here to avoid double-count
+        prod['fh'] = rm * carry / 365 * bk   # FG holding based on landed cost (correct)
+        prod['wc'] = rm * (1 - salv)         # expiry write-down = landed cost × (1-salvage)
         avg = sum(demand[k]) / T
         sig = avg * mape / 100
         alt = sum(p.get('lt', 3) for p in parts) / max(len(parts), 1)
