@@ -6708,15 +6708,108 @@ function solveMILPServer(){
   var payload={capacity_mode:_multiSKU.enabled?(_multiSKU.lineMode||'shared'):'single',params:{T:C.tDays,start_month:_sm,shelf:State.p.shelf,carry_rate:(State.p.carryRate||24)/100,switch_cost:State.p.prodSetupCost||50,wh_max:State.p.whMaxUnits,fixed_daily:State.p.fixedFactory,backorder_on:State.p.backorder,salvage_rate:(State.p.salvageRate||80)/100,mape_pct:State.p.mape,service_level:State.p.sl/100,capacity:C.effCap},products:[]};
   var skuIds=_multiSKU.enabled?_multiSKU.skus.map(function(s){return s.id;}):[(State.activeSKU||'cake')];
   skuIds.forEach(function(sid){var sd=SKUData[sid];if(!sd)return;var r=_multiSKU.results[sid];var cons=r&&r.consensus?r.consensus:(DP.consensus||[]);var cons_sliced=cons.slice(_sm,_sm+_pm);var bom=(sd.bom||State.bom).map(function(b){return{name:b.name,qty:b.qty,cost:b.cost,trans:b.trans||0.5,trans_mode:b.transMode||'perUnit',lt:b.lt||3,hold_pct:b.holdPct||24,partYield:(b.partYield||100)/100,moq:b.moq||20,max_order:b.max||200,rm_cap:b.rmCapacity||1000,ord_cost:b.ordCost||50};});var sku=_multiSKU.skus.find(function(s2){return s2.id===sid;});payload.products.push({name:sku?sku.name:sid,yield_pct:(sd.params?sd.params.yield:State.p.yield)/100,sell_price:sku?sku.sellPrice:State.p.sellPrice,bo_scenario:sku?sku.boScenario||'A':'A',demand_monthly:cons_sliced,parts:bom});});
+  var dbg=document.getElementById('milpDebug');
+  if(dbg){dbg.innerHTML='<div style="padding:6px 10px;font-family:JetBrains Mono,monospace;font-size:8px;color:var(--ac)">⏳ Solving on server… this may take 1–4 minutes on free tier. Do not close the tab.</div>';dbg.style.display='block';dbg.scrollIntoView({behavior:'smooth',block:'start'});}
   fetch(serverUrl+'/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(res){return res.json();}).then(function(data){
-    if(data.error){alert('Error: '+data.error);return;}
-    var plan=data.mps_plan;if(!plan){alert('No plan');return;}
-    Object.keys(plan).forEach(function(pn){State.c.lahPlan=plan[pn].slice(0,C.tDays);while(State.c.lahPlan.length<C.tDays)State.c.lahPlan.push(0);});
+    if(data.error){
+      if(dbg){dbg.innerHTML='<div style="padding:6px 10px;font-family:JetBrains Mono,monospace;font-size:8px;color:var(--dg)">❌ Server error: '+data.error+(data.trace?'<details><summary style="cursor:pointer">trace</summary><pre style="font-size:6.5px;overflow:auto;max-height:100px">'+data.trace+'</pre></details>':'')+'</div>';dbg.style.display='block';}
+      return;
+    }
+    var plan=data.mps_plan;if(!plan){if(dbg)dbg.innerHTML='<div style="color:var(--dg);font-size:8px;padding:6px">No mps_plan in response</div>';return;}
+    // Store MPS plan — per SKU for multi-SKU, single for single
+    if(_multiSKU.enabled){
+      _multiSKU.skus.forEach(function(sku){
+        var pn=sku.name;if(!plan[pn])return;
+        var sd=SKUData[sku.id];if(!sd)return;
+        if(!sd.c)sd.c={};
+        sd.c.lahPlan=plan[pn].slice(0,C.tDays);
+        while(sd.c.lahPlan.length<C.tDays)sd.c.lahPlan.push(0);
+        sd.c.milpOK=true;
+      });
+      var actSku=_multiSKU.skus.find(function(s){return s.id===(State.activeSKU||'cake');});
+      var actName=actSku?actSku.name:Object.keys(plan)[0];
+      if(plan[actName]){State.c.lahPlan=plan[actName].slice(0,C.tDays);while(State.c.lahPlan.length<C.tDays)State.c.lahPlan.push(0);}
+    }else{
+      var firstKey=Object.keys(plan)[0];
+      if(firstKey){State.c.lahPlan=plan[firstKey].slice(0,C.tDays);while(State.c.lahPlan.length<C.tDays)State.c.lahPlan.push(0);}
+    }
     if(data.procurement){State.c.milpProcurement=data.procurement;State.c.milpImported=true;}
-    State.c.milpOK=true;State.c.milpMsg='Server ('+data.status+', $'+Math.round(data.cost)+', '+data.solve_time+'s)';
+    State.c.milpOK=true;State.c.milpMsg='Server MILP: '+data.status+' | $'+Math.round(data.cost).toLocaleString()+' | '+data.solve_time+'s';
+    renderMILPServerResults(data,C);
     calcModels();runMC();_needS1=true;renderS1();renderDown();
-    alert('Server MILP: '+data.status+', $'+Math.round(data.cost));
-  }).catch(function(err){alert('Server error: '+err.message);});
+  }).catch(function(err){
+    if(dbg){dbg.innerHTML='<div style="padding:6px 10px;font-family:JetBrains Mono,monospace;font-size:8px;color:var(--dg)">❌ Network error: '+err.message+'</div>';dbg.style.display='block';}
+  });
+}
+
+function renderMILPServerResults(data,C){
+  var h='';
+  var stCol=data.status==='Optimal'?'var(--a3)':data.status==='Feasible'?'var(--ac)':'var(--dg)';
+  // ── Header ──
+  h+='<div style="background:var(--s2);border:1px solid '+stCol+';border-radius:6px;padding:8px 12px;margin-bottom:6px;font-family:JetBrains Mono,monospace">';
+  h+='<span style="color:'+stCol+';font-weight:700;font-size:9px">✅ '+data.status+'</span>';
+  h+='<span style="color:var(--td);font-size:8px"> | Total cost: </span><b style="color:var(--ac);font-size:10px">$'+Math.round(data.cost).toLocaleString()+'</b>';
+  h+='<span style="color:var(--td);font-size:8px"> | Solve time: '+data.solve_time+'s | '+data.periods+' periods '+(data.bucketed?'(weekly bucketed)':'(daily)')+'</span>';
+  if(data.fill_rates){
+    h+='<br><span style="font-size:7.5px;color:var(--td)">Fill rates: ';
+    Object.keys(data.fill_rates).forEach(function(nm){var fr=data.fill_rates[nm],col=fr>=98?'var(--a3)':fr>=90?'var(--ac)':'var(--dg)';h+='<b style="color:'+col+'">'+nm+'</b> '+fr+'%&nbsp;&nbsp;';});
+    h+='</span>';
+  }
+  if(data.ss_used){
+    h+='<br><span style="font-size:7.5px;color:var(--td)">Safety stock used: ';
+    Object.keys(data.ss_used).forEach(function(nm){h+='<b style="color:var(--ac)">'+nm+'</b> '+data.ss_used[nm]+'u&nbsp;&nbsp;';});
+    h+='</span>';
+  }
+  h+='</div>';
+  // ── MPS Plan Table ──
+  if(data.mps_plan){
+    var prods=Object.keys(data.mps_plan);
+    var planLen=prods.length?data.mps_plan[prods[0]].length:0;
+    var bk=5;var nB=Math.ceil(planLen/bk);
+    h+='<div style="font-size:8px;font-weight:700;color:var(--a3);margin:4px 0 3px;font-family:JetBrains Mono,monospace">📦 MASTER PRODUCTION SCHEDULE &nbsp;<span style="font-weight:400;color:var(--td)">(units per '+bk+'-day bucket)</span></div>';
+    h+='<div style="overflow-x:auto;margin-bottom:8px"><table style="border-collapse:collapse;font-family:JetBrains Mono,monospace;font-size:7px;white-space:nowrap">';
+    h+='<thead><tr style="background:var(--s3)">';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:left;color:var(--td)">Product</th>';
+    for(var b=0;b<nB;b++){var d0=b*bk+1,d1=Math.min((b+1)*bk,planLen);h+='<th style="padding:2px 4px;border:1px solid var(--br);text-align:center;color:var(--td);min-width:28px">D'+d0+(d1>d0?'–'+d1:'')+'</th>';}
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:right;color:var(--ac)">TOTAL</th></tr></thead><tbody>';
+    prods.forEach(function(nm){
+      var arr=data.mps_plan[nm]||[],total=arr.reduce(function(s,v){return s+(v||0);},0);
+      h+='<tr><td style="padding:2px 8px;border:1px solid var(--br);color:var(--a3);font-weight:700">'+nm+'</td>';
+      for(var b=0;b<nB;b++){var sum=0;for(var d=b*bk;d<Math.min((b+1)*bk,arr.length);d++)sum+=arr[d]||0;h+='<td style="padding:2px 4px;border:1px solid var(--br);text-align:center;'+(sum>0?'background:rgba(0,220,160,0.1)':'')+'">'+(sum||'–')+'</td>';}
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);text-align:right;font-weight:700;color:var(--ac)">'+total+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  // ── Procurement Schedule ──
+  h+='<div style="font-size:8px;font-weight:700;color:var(--ac);margin:4px 0 3px;font-family:JetBrains Mono,monospace">🚛 PROCUREMENT SCHEDULE &nbsp;<span style="font-weight:400;color:var(--td)">(MILP-optimal purchase orders)</span></div>';
+  if(data.procurement&&Object.keys(data.procurement).length>0){
+    var rows=[];
+    Object.keys(data.procurement).forEach(function(nm){(data.procurement[nm]||[]).forEach(function(po){rows.push({name:nm,day:po.day,qty:po.qty,arrives:po.arrives});});});
+    rows.sort(function(a,b){return a.day-b.day||(a.name>b.name?1:-1);});
+    h+='<div style="overflow-x:auto;max-height:220px;overflow-y:auto"><table style="border-collapse:collapse;font-family:JetBrains Mono,monospace;font-size:7px;white-space:nowrap;width:100%">';
+    h+='<thead style="position:sticky;top:0;background:var(--s3)"><tr>';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:left;color:var(--td)">#</th>';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:left;color:var(--td)">Material</th>';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:center;color:var(--td)">Order Day</th>';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:right;color:var(--td)">Qty (units)</th>';
+    h+='<th style="padding:2px 8px;border:1px solid var(--br);text-align:center;color:var(--td)">Arrives Day</th>';
+    h+='</tr></thead><tbody>';
+    rows.forEach(function(row,ri){
+      h+='<tr style="'+(ri%2?'background:var(--s2)':'')+'">';
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);color:var(--td)">'+(ri+1)+'</td>';
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);color:var(--ac)">'+row.name+'</td>';
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);text-align:center">Day '+row.day+'</td>';
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);text-align:right;font-weight:700;color:var(--a3)">'+row.qty.toLocaleString()+'</td>';
+      h+='<td style="padding:2px 8px;border:1px solid var(--br);text-align:center;color:var(--td)">Day '+row.arrives+'</td>';
+      h+='</tr>';
+    });
+    h+='</tbody></table></div>';
+    h+='<div style="font-size:7px;color:var(--td);font-family:JetBrains Mono,monospace;margin-top:3px">'+rows.length+' purchase orders. ↓ Scroll down — Section 3/4 below shows heuristic procurement comparison (EOQ/WW-DP/Silver-Meal competing against the MILP-optimal plan above).</div>';
+  }else{
+    h+='<div style="font-size:7.5px;color:var(--td);font-family:JetBrains Mono,monospace;padding:4px">No procurement orders returned (demand may be zero or within initial inventory).</div>';
+  }
+  var dbg=document.getElementById('milpDebug');
+  if(dbg){dbg.innerHTML=h;dbg.style.cssText='display:block;padding:8px;border-radius:6px;background:var(--s1);border:1px solid var(--br);margin-bottom:8px';dbg.scrollIntoView({behavior:'smooth',block:'start'});}
 }
 
 function importMILPResult(){
